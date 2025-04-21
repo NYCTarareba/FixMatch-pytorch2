@@ -73,10 +73,17 @@ def build_parser():
     return parser
 
 def load_config(parser_args):
+    """
+    Load config yaml file and override with command line arguments
+    """
     # Load config file
     with open(parser_args.config, 'r') as f:
         args_dict = yaml.safe_load(f)
     args = SimpleNamespace(**args_dict)
+    
+    # save out based on config suffix
+    args.out = parser_args.config.replace('.yaml', '').split('_')[-1]
+
     # Override with command line arguments
     for key, value in vars(parser_args).items():
         if value is not None:
