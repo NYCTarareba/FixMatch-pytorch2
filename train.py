@@ -55,6 +55,7 @@ def main():
 
 def run_train_with_args(args):
     global best_acc
+    # decide the device
     if args.local_rank == -1:
         # single GPU or not distributed, compatible with MPS
         if torch.backends.mps.is_available():
@@ -159,6 +160,7 @@ def run_train_with_args(args):
         logger.info("==> Resuming from checkpoint..")
         assert os.path.isfile(
             args.resume), "Error: no checkpoint directory found!"
+        # will fetch the parent directory of the checkpoint as out dir
         args.out = os.path.dirname(args.resume)
         checkpoint = torch.load(args.resume)
         best_acc = checkpoint['best_acc']
