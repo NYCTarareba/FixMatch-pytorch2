@@ -24,36 +24,37 @@ from utils import build_parser, load_config
 logger = logging.getLogger(__name__)
 best_acc = 0
 
+def create_model(args):
+    if args.arch == 'wideresnet':
+        import models.wideresnet as models
+        model = models.build_wideresnet(depth=args.model_depth,
+                                        widen_factor=args.model_width,
+                                        dropout=0,
+                                        num_classes=args.num_classes)
+    elif args.arch == 'resnext':
+        import models.resnext as models
+        model = models.build_resnext(cardinality=args.model_cardinality,
+                                        depth=args.model_depth,
+                                        width=args.model_width,
+                                        num_classes=args.num_classes)
+    elif args.arch == 'resnet18':
+        from models.resnet18_cifar import build_resnet18_cifar
+        model = build_resnet18_cifar(num_classes=args.num_classes)
+
+    logger.info("Total params: {:.2f}M".format(
+        sum(p.numel() for p in model.parameters()) / 1e6))
+    return model
+
 
 def main():
     # Parse arguments
     parser = build_parser()
     parser_args = parser.parse_args()
     args = load_config(parser_args)
+    run_train_with_args(args)
 
+def run_train_with_args(args):
     global best_acc
-
-    def create_model(args):
-        if args.arch == 'wideresnet':
-            import models.wideresnet as models
-            model = models.build_wideresnet(depth=args.model_depth,
-                                            widen_factor=args.model_width,
-                                            dropout=0,
-                                            num_classes=args.num_classes)
-        elif args.arch == 'resnext':
-            import models.resnext as models
-            model = models.build_resnext(cardinality=args.model_cardinality,
-                                         depth=args.model_depth,
-                                         width=args.model_width,
-                                         num_classes=args.num_classes)
-        elif args.arch == 'resnet18':
-            from models.resnet18_cifar import build_resnet18_cifar
-            model = build_resnet18_cifar(num_classes=args.num_classes)
-
-        logger.info("Total params: {:.2f}M".format(
-            sum(p.numel() for p in model.parameters()) / 1e6))
-        return model
-
     if args.local_rank == -1:
         # single GPU or not distributed, compatible with MPS
         if torch.backends.mps.is_available():
@@ -153,6 +154,7 @@ def main():
 
     args.start_epoch = 0
 
+    hist_log_dict = {'train': {}, 'test': {}}
     if args.resume:
         logger.info("==> Resuming from checkpoint..")
         assert os.path.isfile(
@@ -161,11 +163,15 @@ def main():
         checkpoint = torch.load(args.resume)
         best_acc = checkpoint['best_acc']
         args.start_epoch = checkpoint['epoch']
+        # load model, ema_model, optimizer, scheduler
         model.load_state_dict(checkpoint['state_dict'])
         if args.use_ema:
             ema_model.ema.load_state_dict(checkpoint['ema_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
+        # load hist_log_dict
+        if 'hist_log_dict' in checkpoint:
+            hist_log_dict = checkpoint['hist_log_dict']
 
     if args.amp:
         from apex import amp
@@ -187,11 +193,11 @@ def main():
 
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler)
+          model, optimizer, ema_model, scheduler, hist_log_dict)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler):
+          model, optimizer, ema_model, scheduler, hist_log_dict):
     if args.amp:
         from apex import amp
     global best_acc
@@ -210,7 +216,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
     model.train()
     # if test, only run first two epochs
     if args.test:
-        args.epochs = 3
+        args.epochs = 2
     for epoch in range(args.start_epoch, args.epochs):
         batch_time = AverageMeter()
         data_time = AverageMeter()
@@ -294,6 +300,13 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     loss_u=losses_u.avg,
                     mask=mask_probs.avg))
                 p_bar.update()
+            # save to hist_log_dict
+            hist_log_dict['train'][epoch] = {
+                'loss': losses.avg,
+                'loss_x': losses_x.avg,
+                'loss_u': losses_u.avg,
+                'mask': mask_probs.avg
+            }
 
         if not args.no_progress:
             p_bar.close()
@@ -304,7 +317,9 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             test_model = model
 
         if args.local_rank in [-1, 0]:
-            test_loss, test_acc = test(args, test_loader, test_model, epoch)
+            # call test function here, also update the hist_log_dict
+            test_loss, test_acc, hist_log_dict = test(args, test_loader, test_model, epoch,
+                                       hist_log_dict)
 
             args.writer.add_scalar('train/1.train_loss', losses.avg, epoch)
             args.writer.add_scalar('train/2.train_loss_x', losses_x.avg, epoch)
@@ -328,6 +343,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 'best_acc': best_acc,
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
+                'hist_log_dict': hist_log_dict
             }, is_best, args.out)
 
             test_accs.append(test_acc)
@@ -339,7 +355,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         args.writer.close()
 
 
-def test(args, test_loader, model, epoch):
+def test(args, test_loader, model, epoch, hist_log_dict):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -377,12 +393,17 @@ def test(args, test_loader, model, epoch):
                     top1=top1.avg,
                     top5=top5.avg,
                 ))
+                hist_log_dict['test'][epoch] = {
+                    'loss': losses.avg,
+                    'top1': top1.avg,
+                    'top5': top5.avg
+                }
         if not args.no_progress:
             test_loader.close()
 
     logger.info("top-1 acc: {:.2f}".format(top1.avg))
     logger.info("top-5 acc: {:.2f}".format(top5.avg))
-    return losses.avg, top1.avg
+    return losses.avg, top1.avg, hist_log_dict
 
 
 if __name__ == '__main__':
