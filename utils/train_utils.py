@@ -66,10 +66,6 @@ def build_parser():
                         default='',
                         type=str,
                         help='path to latest checkpoint (default: none)')
-    # for test, stop at stop-epoch
-    parser.add_argument('--stop-epoch', default=2, type=int)
-    parser.add_argument('--label-ratio', default=0.1, type=float)
-    parser.add_argument('--threshold', default=0.95, type=float)
     return parser
 
 def load_config(parser_args):
