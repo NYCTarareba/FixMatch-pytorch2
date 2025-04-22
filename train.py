@@ -307,7 +307,10 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 'loss': losses.avg,
                 'loss_x': losses_x.avg,
                 'loss_u': losses_u.avg,
-                'mask': mask_probs.avg
+                'mask': mask_probs.avg,
+                'bt': batch_time.avg,
+                'data': data_time.avg,
+
             }
 
         if not args.no_progress:
